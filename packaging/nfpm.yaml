@@ -1,0 +1,35 @@
+name: asn2cidr
+arch: all
+platform: linux
+version: ${VERSION}
+release: "1"
+section: net
+priority: optional
+maintainer: Mateusz Mikrut <30625253+mateuszmikrut@users.noreply.github.com>
+description: Print an ASN's announced IP prefixes using RIPEstat.
+homepage: https://github.com/mateuszmikrut/asn2cidr
+license: MIT
+
+contents:
+  - src: packaging/asn2cidr
+    dst: /usr/bin/asn2cidr
+    file_info:
+      mode: 0755
+  - src: ans2cidr.py
+    dst: /usr/lib/asn2cidr/ans2cidr.py
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/asn2cidr/README.md
+  - src: LICENSE
+    dst: /usr/share/licenses/asn2cidr/LICENSE
+
+overrides:
+  deb:
+    depends:
+      - python3 (>= 3.9)
+      - python3-requests
+  rpm:
+    depends:
+      - python3 >= 3.9
+      - python3-requests

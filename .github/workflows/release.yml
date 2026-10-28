@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    # GitHub tag filters are globs. The version job enforces the exact grammar.
+    tags:
+      - '*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check stable semantic-version tag
+    if: github.ref_type == 'tag' && github.event.deleted == false
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: version
+        run: python3 scripts/release_version.py
+
+  build:
+    name: Build and verify release packages
+    needs: version
+    if: needs.version.outputs.version != ''
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.9'
+      - name: Check tag rules
+        run: python -m unittest discover -s tests -v
+      - name: Build Python distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Check the installed Python command and version
+        run: |
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          asn2cidr --help
+          python -c 'import importlib.metadata, os; assert importlib.metadata.version("asn2cidr") == os.environ["VERSION"]'
+      - name: Install nFPM
+        env:
+          NFPM_VERSION: 2.48.0
+          NFPM_SHA256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            --output "$RUNNER_TEMP/nfpm.tar.gz"
+          echo "$NFPM_SHA256  $RUNNER_TEMP/nfpm.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/nfpm-bin"
+          tar -xzf "$RUNNER_TEMP/nfpm.tar.gz" -C "$RUNNER_TEMP/nfpm-bin" nfpm
+          echo "$RUNNER_TEMP/nfpm-bin" >> "$GITHUB_PATH"
+      - name: Build Debian and RPM packages
+        run: |
+          nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+          nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/
+      - name: Check Debian installation
+        run: |
+          docker run --rm -v "$PWD/dist:/packages:ro" debian:bookworm-slim \
+            sh -ec 'apt-get update; apt-get install -y /packages/*.deb; asn2cidr --help'
+      - name: Check RPM installation
+        run: |
+          docker run --rm -v "$PWD/dist:/packages:ro" fedora:43 \
+            sh -ec 'dnf install -y /packages/*.rpm; asn2cidr --help'
+      - name: Checksum release packages
+        run: |
+          cd dist
+          sha256sum *.whl *.tar.gz *.deb *.rpm > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/asn2cidr
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-packages
+          path: artifacts/
+      - name: Select Python distributions
+        run: |
+          mkdir dist
+          cp artifacts/*.whl artifacts/*.tar.gz dist/
+      - name: Publish Python distributions
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-packages
+          path: dist/
+      - name: Publish release notes and packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes
